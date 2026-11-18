@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 import { buildTour, normalize, parseSpans, relative, resolve } from '../hooks/tour'
 import type { Reader } from '../hooks/tour'
@@ -164,7 +164,10 @@ test('highlighted and context lines split into runs', async () => {
 })
 
 test('the tool opens a pane that steps through the tour', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.messages', () => ({ value: [] }))
   on('session.cwd', () => ({ value: ROOT }))
   on('command.register', () => ({ value: { command: 'tour' } }))
   on('tool.register', () => ({ value: { tool: 'mcp__tour__show' } }))
@@ -206,4 +209,55 @@ test('the tool opens a pane that steps through the tour', async ($, on) => {
     await ui.press({ key: 'close' })
     await ui.unmount()
   }
+})
+
+test('a resumed session reopens its tours at the step it left', async ($, on) => {
+  const built = await buildTour('call-1', { title: 'Orders', steps: STEPS }, ROOT, reader)
+  const tour = 'tour' in built ? built.tour : undefined
+
+  mock.clock(on)
+  mock.store(on, { 'tour:call-1': { shape: 1, usedAt: 0, step: 2, tour } })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.messages', () => ({
+    value: [
+      { role: 'user', text: 'how are orders stored?', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [{ tool_use_id: 'call-1', tool: 'mcp__tour__show', input: {} }],
+      },
+    ],
+  }))
+  on('command.register', () => ({ value: { command: 'tour' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__tour__show' } }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /^src\/.*:\d/ }))?.text).toBe('src/db/orders.ts:1-3')
+  await ui.unmount()
+})
+
+test('an unfocused pane shows how to give it the keys', async ($, on) => {
+  const built = await buildTour('call-2', { title: 'Orders', steps: STEPS }, ROOT, reader)
+  const tour = 'tour' in built ? built.tour : undefined
+
+  mock.clock(on)
+  mock.store(on, { 'tour:call-2': { shape: 1, usedAt: 0, step: 0, tour } })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.messages', () => ({
+    value: [{ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'call-2', tool: 'mcp__tour__show', input: {} }] }],
+  }))
+  on('command.register', () => ({ value: { command: 'tour' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__tour__show' } }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const unfocused = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, isFocused: false } })
+
+  expect((await unfocused.find({ type: 'Text', text: /ctrl\+x/ }))?.text).toBe('ctrl+x tab')
+  await unfocused.unmount()
+  const focused = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect(await focused.find({ type: 'Text', text: /ctrl\+x/ })).toBeUndefined()
+  await focused.unmount()
 })

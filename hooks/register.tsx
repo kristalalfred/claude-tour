@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Place, Tour } from '../types'
+import { load, prune, save } from './saved'
 import { buildTour, spanText } from './tour'
 import type { Reader } from './tour'
 import { drawTour } from './view'
@@ -90,11 +91,36 @@ async function showing($: EngineInterface): Promise<{ tour: Tour; step: number }
   return { tour, step }
 }
 
+async function restore($: EngineInterface): Promise<void> {
+  const messages = await $.session.messages()
+
+  if (!Array.isArray(messages)) {
+    return
+  }
+  const ids = messages
+    .flatMap(message => message.toolUses)
+    .filter(use => use.tool === TOOL && use.isError !== true)
+    .map(use => use.tool_use_id)
+  const found = (await Promise.all(ids.map(id => load($, id)))).filter(saved => saved !== undefined)
+  const latest = found.at(-1)
+
+  if (latest === undefined) {
+    return
+  }
+  await update($, tours, list => [
+    ...list.filter(known => !found.some(saved => saved.tour.id === known.id)),
+    ...found.map(saved => saved.tour),
+  ])
+  await update($, place, at => at ?? { id: latest.tour.id, step: latest.step })
+}
+
 async function open($: EngineInterface, tour: Tour, step: number) {
   await update($, place, () => ({ id: tour.id, step }))
 
   return $.ui.open({ id: PANE, title: tour.title, focus: true, rows: ROWS, columns: COLUMNS })
 }
+
+let isFocusOwed = false
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -105,6 +131,8 @@ export const register: Register = on => {
       isDeferred: false,
     })
     await $.command.register({ name: 'tour', description: 'Open the latest code tour' })
+    await prune($)
+    await restore($)
 
     return next(e)
   })
@@ -121,7 +149,10 @@ export const register: Register = on => {
     const { tour } = built
 
     await update($, tours, list => [...list.filter(known => known.id !== tour.id), tour])
+    await save($, tour, 0)
     const opened = await open($, tour, 0)
+
+    isFocusOwed = opened.isPlaced
     const count = `${tour.steps.length} step${tour.steps.length === 1 ? '' : 's'}`
 
     return {
@@ -132,7 +163,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'tour' }, async $ => {
-    const shown = await showing($)
+    const shown = (await showing($)) ?? (await restore($).then(() => showing($)))
 
     if (shown === undefined) {
       return { text: 'No tour yet.' }
@@ -140,6 +171,23 @@ export const register: Register = on => {
     await open($, shown.tour, shown.step)
 
     return { text: `Opened "${shown.tour.title}".` }
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+
+    if (!isFocusOwed || e.agentId !== undefined) {
+      return done
+    }
+    isFocusOwed = false
+    const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE && !pane.isFocused)
+    const shown = isOpen ? await showing($) : undefined
+
+    if (shown !== undefined) {
+      await $.ui.open({ id: PANE, title: shown.tour.title, focus: true, rows: ROWS, columns: COLUMNS })
+    }
+
+    return done
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -170,11 +218,12 @@ export const register: Register = on => {
         return
       }
       await update($, place, () => ({ id: tour.id, step }))
+      await save($, tour, step)
     }
 
     const close = () => $.ui.close({ id: PANE })
 
-    return drawTour(kit, tour, shown.step, e.props.bodyColumns, { go, close })
+    return drawTour(kit, tour, shown.step, e.props, { go, close })
   })
 
   on('ui.render', { component: 'ToolUse', props: { tool: TOOL } }, async ($, e, next) => {

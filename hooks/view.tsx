@@ -54,7 +54,13 @@ export function filesOf(tour: Tour): TreeFile[] {
   return files
 }
 
-function drawHeader(kit: Kit, tour: Tour, at: number, { go, close }: Actions): RenderElement {
+function drawHeader(
+  kit: Kit,
+  tour: Tour,
+  at: number,
+  isFocused: boolean,
+  { go, close }: Actions,
+): RenderElement {
   const { Box, Text, Button } = kit
   const isFirst = at === 0
   const isLast = at === tour.steps.length - 1
@@ -67,6 +73,7 @@ function drawHeader(kit: Kit, tour: Tour, at: number, { go, close }: Actions): R
         </Text>
       </Box>
       <Box flexDirection="row" flexShrink={0} gap={2}>
+        {!isFocused && <Text dimColor>ctrl+x tab</Text>}
         <Button key="prev" plain hotkey="p" dimColor={isFirst} onPress={() => go(at - 1)}>
           prev
         </Button>
@@ -216,7 +223,7 @@ export function drawTour(
   kit: Kit,
   tour: Tour,
   at: number,
-  columns: number,
+  { bodyColumns: columns, isFocused }: { bodyColumns: number; isFocused: boolean },
   actions: Actions,
 ): RenderElement {
   const { go } = actions
@@ -232,7 +239,7 @@ export function drawTour(
 
   return (
     <Box flexDirection="column" gap={1}>
-      {drawHeader(kit, tour, at, actions)}
+      {drawHeader(kit, tour, at, isFocused, actions)}
       {drawJourney(kit, tour, at, go)}
       {columns >= WIDE ? (
         <Box flexDirection="row" gap={4}>
