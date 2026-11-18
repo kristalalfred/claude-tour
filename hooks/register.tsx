@@ -1,8 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Place, Tour } from '../types'
-import { load, prune, save } from './saved'
+import type { Place, Thread, Tour } from '../types'
+import { load, prune, save, saveThread } from './saved'
+import { asked, framing, interrupted, isBusy, isNoticeOf, settled } from './thread'
+import type { Outcome } from './thread'
 import { buildTour, spanText } from './tour'
 import type { Reader } from './tour'
 import { drawTour } from './view'
@@ -11,10 +13,14 @@ const PANE = 'tour'
 const TOOL = 'mcp__tour__show'
 const ROWS = 40
 const COLUMNS = 100
+const WRITERS = new Set(['Edit', 'Write', 'NotebookEdit'])
 
 const tours = atom({ plugin: 'tour', key: 'tours' } as const, [] as Tour[], { shape: 'tours-1' })
 const place = atom({ plugin: 'tour', key: 'place' } as const, null as Place | null, {
   shape: 'place-1',
+})
+const threads = atom({ plugin: 'tour', key: 'threads' } as const, [] as Thread[], {
+  shape: 'threads-1',
 })
 
 const DESCRIPTION = [
@@ -112,6 +118,59 @@ async function restore($: EngineInterface): Promise<void> {
     ...found.map(saved => saved.tour),
   ])
   await update($, place, at => at ?? { id: latest.tour.id, step: latest.step })
+  await update($, threads, list => [
+    ...list,
+    ...found
+      .flatMap(saved => (saved.thread === undefined ? [] : [interrupted(saved.thread)]))
+      .filter(thread => !list.some(known => known.id === thread.id)),
+  ])
+}
+
+async function keep($: EngineInterface, id: string, change: (thread: Thread) => Thread) {
+  const list = await update($, threads, known => {
+    const thread = known.find(candidate => candidate.id === id) ?? { id, exchanges: [] }
+
+    return [...known.filter(candidate => candidate.id !== id), change(thread)]
+  })
+  const kept = list.find(candidate => candidate.id === id)
+
+  if (kept !== undefined) {
+    await saveThread($, kept)
+  }
+}
+
+async function threadAgents($: EngineInterface): Promise<string[]> {
+  return (await read($, threads)).flatMap(thread => (thread.agentId === undefined ? [] : [thread.agentId]))
+}
+
+async function ask($: EngineInterface, tour: Tour, step: number, question: string) {
+  const text = question.trim()
+  const thread = (await read($, threads)).find(candidate => candidate.id === tour.id)
+
+  if (text === '' || isBusy(thread)) {
+    return
+  }
+  await keep($, tour.id, known => asked(known, step, text))
+  const prompt = framing(tour, step, text, thread?.agentId === undefined)
+  const fail = (problem: string) => keep($, tour.id, known => settled(known, { problem }))
+
+  if (thread?.agentId !== undefined) {
+    const sent = await $.session.send({ to: thread.agentId, text: prompt })
+
+    return sent.isDelivered ? undefined : fail(sent.reason)
+  }
+  const spawned = await $.agent.spawn({
+    prompt,
+    subagentType: 'fork',
+    description: `Questions on the tour "${tour.title}"`,
+  })
+
+  if (spawned.agentId === undefined) {
+    return fail(spawned.deny ?? 'The question could not be sent.')
+  }
+  const { agentId } = spawned
+
+  await keep($, tour.id, known => ({ ...known, agentId }))
 }
 
 async function open($: EngineInterface, tour: Tour, step: number) {
@@ -176,7 +235,18 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
 
-    if (!isFocusOwed || e.agentId !== undefined) {
+    if (e.agentId !== undefined) {
+      const thread = (await read($, threads)).find(candidate => candidate.agentId === e.agentId)
+      const outcome: Outcome =
+        e.reason === 'answer' ? { answer: e.answer } : { problem: e.answer || `Stopped: ${e.reason}.` }
+
+      if (thread !== undefined) {
+        await keep($, thread.id, known => settled(known, outcome))
+      }
+
+      return done
+    }
+    if (!isFocusOwed) {
       return done
     }
     isFocusOwed = false
@@ -190,7 +260,18 @@ export const register: Register = on => {
     return done
   })
 
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId !== undefined && WRITERS.has(e.tool) && (await threadAgents($)).includes(e.agentId)) {
+      return { deny: 'Questions about a tour only read code; they do not change files.' }
+    }
+
+    return next(e)
+  })
+
   on('prompt.submit', async ($, e, next) => {
+    if (e.origin?.kind === 'task-notification' && isNoticeOf(e.text, await threadAgents($))) {
+      return { drop: '' }
+    }
     const panes = await $.ui.panes()
     const shown = panes.some(pane => pane.id === PANE && pane.isShown) ? await showing($) : undefined
     const step = shown?.tour.steps[shown.step]
@@ -222,8 +303,21 @@ export const register: Register = on => {
     }
 
     const close = () => $.ui.close({ id: PANE })
+    const thread = (await read($, threads)).find(candidate => candidate.id === tour.id)
+    const isAsking = isBusy(thread)
+    const focusAsk = async () => {
+      if (!isAsking) {
+        await $.ui.focus({ requestId: PANE, key: 'ask' })
+      }
+    }
+    const talk = {
+      exchanges: thread?.exchanges ?? [],
+      isAsking,
+      ask: (question: string) => ask($, tour, shown.step, question),
+      focusAsk,
+    }
 
-    return drawTour(kit, tour, shown.step, e.props, { go, close })
+    return drawTour(kit, tour, shown.step, e.props, { go, close }, talk)
   })
 
   on('ui.render', { component: 'ToolUse', props: { tool: TOOL } }, async ($, e, next) => {

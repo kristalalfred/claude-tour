@@ -1,15 +1,22 @@
 import type { Elements, RenderElement } from 'claude-code'
 
-import type { Span, Step, Tour } from '../types'
+import type { Exchange, Span, Step, Tour } from '../types'
 import { spanText } from './tour'
 import { treeRows } from './tree'
 import type { TreeFile } from './tree'
 
-export type Kit = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button' | 'Code' | 'Markdown'>
+export type Kit = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button' | 'Code' | 'Markdown' | 'Input'>
 
 export type Go = (step: number) => Promise<void>
 
 export type Actions = { go: Go; close: () => Promise<void> }
+
+export type Talk = {
+  exchanges: readonly Exchange[]
+  isAsking: boolean
+  ask: (question: string) => Promise<void>
+  focusAsk: () => Promise<void>
+}
 
 const ACCENT = 'claude'
 const WIDE = 120
@@ -60,6 +67,7 @@ function drawHeader(
   at: number,
   isFocused: boolean,
   { go, close }: Actions,
+  { isAsking, focusAsk }: Talk,
 ): RenderElement {
   const { Box, Text, Button } = kit
   const isFirst = at === 0
@@ -79,6 +87,9 @@ function drawHeader(
         </Button>
         <Button key="next" plain hotkey="n" dimColor={isLast} onPress={() => go(at + 1)}>
           next
+        </Button>
+        <Button key="ask-button" plain hotkey="a" dimColor={isAsking} onPress={focusAsk}>
+          ask
         </Button>
         <Button key="close" plain hotkey="q" onPress={close}>
           close
@@ -219,12 +230,40 @@ function drawCode(kit: Kit, step: Step): RenderElement {
   )
 }
 
+function drawTalk(kit: Kit, at: number, { exchanges, isAsking, ask }: Talk): RenderElement {
+  const { Box, Text, Markdown, Input } = kit
+  const here = exchanges.flatMap((exchange, index) => (exchange.step === at ? [{ exchange, index }] : []))
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      {here.map(({ exchange, index }) => (
+        <Box key={`exchange-${index}`} flexDirection="column">
+          <Text bold color={ACCENT} wrap="wrap">
+            {`› ${exchange.question}`}
+          </Text>
+          {exchange.answer !== undefined ? (
+            <Markdown key={`answer-${index}`} text={exchange.answer} />
+          ) : exchange.problem !== undefined ? (
+            <Text color="error" wrap="wrap">
+              {exchange.problem}
+            </Text>
+          ) : (
+            <Text dimColor>…</Text>
+          )}
+        </Box>
+      ))}
+      {!isAsking && <Input key="ask" placeholder="Ask about this step" submitLabel="ask" onSubmit={ask} />}
+    </Box>
+  )
+}
+
 export function drawTour(
   kit: Kit,
   tour: Tour,
   at: number,
   { bodyColumns: columns, isFocused }: { bodyColumns: number; isFocused: boolean },
   actions: Actions,
+  talk: Talk,
 ): RenderElement {
   const { go } = actions
   const { Box, Markdown } = kit
@@ -233,13 +272,14 @@ export function drawTour(
     <Box flexDirection="column" flexGrow={1} flexShrink={1} gap={1}>
       <Markdown key={`note-${at}`} text={step.note} />
       {drawCode(kit, step)}
+      {drawTalk(kit, at, talk)}
     </Box>
   )
   const tree = drawTree(kit, tour, at, go)
 
   return (
     <Box flexDirection="column" gap={1}>
-      {drawHeader(kit, tour, at, isFocused, actions)}
+      {drawHeader(kit, tour, at, isFocused, actions, talk)}
       {drawJourney(kit, tour, at, go)}
       {columns >= WIDE ? (
         <Box flexDirection="row" gap={4}>
