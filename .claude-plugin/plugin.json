@@ -1,0 +1,8 @@
+{
+  "name": "tour",
+  "version": "0.1.0",
+  "description": "Guided code tours in a pane: a journey graph, a file tree and a code viewer that highlight each step while its explanation sits beside it.",
+  "author": { "name": "kristalalfred" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

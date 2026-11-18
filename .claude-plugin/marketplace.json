@@ -1,0 +1,6 @@
+{
+  "name": "claude-tour",
+  "owner": { "name": "kristalalfred" },
+  "description": "Guided code tours in a Claude Code pane",
+  "plugins": [{ "name": "tour", "source": "./" }]
+}
